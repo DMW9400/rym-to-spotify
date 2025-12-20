@@ -60,6 +60,26 @@ This project consists of two Python scripts designed to scrape public lists from
 
 ## Usage
 
+### Quick Start (Recommended)
+
+Use the `rym-to-spotify.sh` wrapper script to scrape and import in one command:
+
+```bash
+./rym-to-spotify.sh https://rateyourmusic.com/list/M4rcus/dream-folk/
+```
+
+**Options:**
+
+* `-t, --tracks-per-release N`: Number of tracks to add per album/EP (default: 1)
+* `-h, --help`: Show help message
+
+```bash
+# Add top 3 tracks per album:
+./rym-to-spotify.sh https://rateyourmusic.com/list/M4rcus/dream-folk/ -t 3
+```
+
+### Manual Two-Step Process
+
 **Step 1: Scrape the RYM List**
 
 * Run `rym-to-txt.py` with the RYM list URL:
