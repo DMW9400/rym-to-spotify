@@ -17,7 +17,7 @@ BATCH_SIZE = 100
 MAX_RETRIES = 3
 RETRY_DELAY = 5
 DEFAULT_DELAY = 0.1
-SCOPE = 'playlist-modify-private'
+SCOPE = 'playlist-modify-private playlist-modify-public'
 
 # --- ANSI Color Codes ---
 class Colors:
@@ -66,15 +66,22 @@ sp, user_id = initialize_spotify_client()
 
 # --- Helper Functions ---
 def parse_line(line):
-    """Parses a line from the input file into type and content parts."""
+    """Parses a line from the input file into type, content parts, and optional spotify_id."""
     line = line.lstrip("- ").strip()
-    if ":" not in line: return None, None, None, None
+    if ":" not in line: return None, None, None, None, None
     entry_type, content = map(str.strip, line.split(":", 1))
     entry_type = entry_type.lower()
 
-    if entry_type == "title": return entry_type, content.strip('"'), None, None
-    if entry_type == "url": return entry_type, None, content.strip('"'), None
-    if entry_type not in ["song", "singles", "album", "ep", "compilation", "single"]: return None, None, None, None
+    if entry_type == "title": return entry_type, content.strip('"'), None, None, None
+    if entry_type == "url": return entry_type, None, content.strip('"'), None, None
+    if entry_type not in ["song", "singles", "album", "ep", "compilation", "single"]: return None, None, None, None, None
+
+    # Extract embedded Spotify ID if present: [spotify:ID]
+    spotify_id = None
+    spotify_match = re.search(r'\[spotify:(\w+)\]', content)
+    if spotify_match:
+        spotify_id = spotify_match.group(1)
+        content = content[:spotify_match.start()].strip()
 
     # Regex splits by ' - ' respecting quotes
     parts = re.split(r'\s+-\s+(?=(?:[^"]*"[^"]*")*[^"]*$)', content)
@@ -83,12 +90,12 @@ def parse_line(line):
     proc_type = "song" if entry_type in ["song", "singles", "single"] else "album"
 
     if proc_type == "song":
-        if len(parts) == 2: return entry_type, parts[0], None, parts[1]   # name - artist
-        if len(parts) >= 3: return entry_type, parts[0], parts[1], parts[2]  # name - album - artist
+        if len(parts) == 2: return entry_type, parts[0], None, parts[1], spotify_id   # name - artist
+        if len(parts) >= 3: return entry_type, parts[0], parts[1], parts[2], spotify_id  # name - album - artist
     elif proc_type == "album": # album, ep, compilation
-        if len(parts) >= 2: return entry_type, parts[0], parts[1], None   # name - artist
+        if len(parts) >= 2: return entry_type, parts[0], parts[1], None, spotify_id   # name - artist
 
-    return None, None, None, None # Invalid format
+    return None, None, None, None, None # Invalid format
 
 def extract_western_name(text):
     """Extracts text within the first found brackets or parentheses."""
@@ -117,6 +124,10 @@ def call_with_retry(func, *args, **kwargs):
         except SpotifyException as e:
             if e.http_status == 429:
                 retry_after = int(e.headers.get('Retry-After', RETRY_DELAY))
+                if retry_after > 60:
+                    print(colorize(f"\nDaily API quota exceeded. Retry available in {retry_after // 3600}h {(retry_after % 3600) // 60}m.", Colors.RED))
+                    print(colorize("Run this command again later — cached results will be reused.", Colors.YELLOW))
+                    sys.exit(1)
                 print(colorize(f"Rate limit hit. Retrying after {retry_after}s (Attempt {attempt + 1}/{MAX_RETRIES})...", Colors.YELLOW))
                 time.sleep(retry_after)
             else:
@@ -254,7 +265,7 @@ def search_song(song_name, album_name, artist_name):
     return search_spotify('search_song', params, _perform_song_search)
 
 def get_album_track_details(album_id):
-    """Fetches and caches full track details (id, name, popularity) for an album."""
+    """Fetches and caches track details (id, name) for an album using album_tracks endpoint."""
     query_type = cache_manager.ALBUM_DETAILS_TYPE
     params = {"album_id": album_id}
     cached_details = cache_manager.check_cache(query_type, params)
@@ -267,28 +278,21 @@ def get_album_track_details(album_id):
     source = 'API'
     full_details_list = []
     try:
-        # Step 1: Get all track IDs (paginated)
-        all_track_ids = []
         offset = 0
         while True:
             results = call_with_retry(sp.album_tracks, album_id, limit=50, offset=offset)
             page_tracks = results.get('items', [])
             if not page_tracks: break
-            all_track_ids.extend([track['id'] for track in page_tracks if track and track.get('id')])
+            for track in page_tracks:
+                if track and track.get('id'):
+                    full_details_list.append({
+                        'id': track['id'],
+                        'popularity': track.get('popularity', 0),
+                        'name': track.get('name', 'N/A')
+                    })
             offset += len(page_tracks)
             if len(page_tracks) < 50: break # Last page
 
-        # Step 2: Get full track details (including popularity) in batches
-        for i in range(0, len(all_track_ids), 50):
-            batch_ids = all_track_ids[i:i+50]
-            track_details_batch = call_with_retry(sp.tracks, batch_ids)
-            for track_data in track_details_batch.get('tracks', []):
-                if track_data and track_data.get('id'):
-                    full_details_list.append({
-                        'id': track_data['id'],
-                        'popularity': track_data.get('popularity', 0),
-                        'name': track_data.get('name', 'N/A') # Handle potentially missing names
-                    })
         cache_manager.update_cache(query_type, params, full_details_list)
         return full_details_list, source
     except Exception as e:
@@ -352,15 +356,19 @@ def read_music_file(filepath):
 
         valid_entry_count = 0
         for line in lines:
-            type_name, p1, p2, p3 = parse_line(line)
+            type_name, p1, p2, p3, spotify_id = parse_line(line)
             if type_name == "title": playlist_title = p1
             elif type_name == "url": playlist_description = p2
             elif type_name == "song" and p1 and p3: # name, artist required for song
-                entries.append({"input_type": "song", "name": p1, "album": p2, "artist": p3})
+                entry = {"input_type": "song", "name": p1, "album": p2, "artist": p3}
+                if spotify_id: entry["spotify_id"] = spotify_id
+                entries.append(entry)
                 valid_entry_count += 1
             elif type_name in ["album", "ep", "compilation", "single"] and p1 and p2: # name, artist required for album-like
                 # Store original type for potential future use, process as 'album'
-                entries.append({"input_type": "album", "name": p1, "artist": p2, "original_input_type": type_name})
+                entry = {"input_type": "album", "name": p1, "artist": p2, "original_input_type": type_name}
+                if spotify_id: entry["spotify_id"] = spotify_id
+                entries.append(entry)
                 valid_entry_count += 1
             # Silently ignore lines that don't parse correctly
 
@@ -400,8 +408,13 @@ def process_entry(entry, processed_track_ids_this_run, tracks_per_release_count)
                 status_code = 'N'
 
         elif entry['input_type'] == 'album':
-            album_id, source = search_album(entry['name'], entry['artist'])
-            source_code = 'C' if source == 'CACHE' else 'A'
+            if entry.get('spotify_id'):
+                album_id = entry['spotify_id']
+                source = 'EMBEDDED'
+                source_code = 'E'
+            else:
+                album_id, source = search_album(entry['name'], entry['artist'])
+                source_code = 'C' if source == 'CACHE' else 'A'
             if album_id:
                 status_code = 'F' # Album found
                 found_tracks_details, track_source = get_top_tracks_from_album(
@@ -442,7 +455,7 @@ def print_entry_result(index, total, entry, status_code, source_code, details):
     artist_name = colorize(entry.get('artist', 'N/A'), Colors.MAGENTA)
     orig_type = f" ({entry.get('original_input_type', entry.get('input_type', ''))})"
 
-    src_color = {'C': Colors.CYAN, 'A': Colors.BLUE}.get(source_code, Colors.RED)
+    src_color = {'C': Colors.CYAN, 'A': Colors.BLUE, 'E': Colors.GREEN}.get(source_code, Colors.RED)
     stat_color = {'F': Colors.GREEN, 'N': Colors.RED, 'E': Colors.RED}.get(status_code, Colors.RED)
     stat_text = {'F': "Found", 'N': "Not Found", 'E': "Error"}.get(status_code, "Unknown")
 
@@ -513,9 +526,16 @@ def main():
 
     entries, playlist_title, playlist_description = read_music_file(args.music_file)
 
+    print(f"Default playlist title: '{colorize(playlist_title, Colors.YELLOW)}'")
+    custom_title = input("Enter playlist title (or press Enter to use default): ").strip()
+    if custom_title:
+        playlist_title = custom_title
+
     print(f"Creating playlist '{colorize(playlist_title, Colors.YELLOW)}'...", end="")
     try:
-        playlist = call_with_retry(sp.user_playlist_create, user=user_id, name=playlist_title, public=False, description=playlist_description)
+        playlist = call_with_retry(sp._post, "me/playlists", payload={
+            "name": playlist_title, "public": False, "collaborative": False, "description": playlist_description
+        })
         playlist_id = playlist['id']
         print(f" {colorize('OK', Colors.GREEN)} (ID: {colorize(playlist_id, Colors.CYAN)})")
     except Exception as e:
