@@ -14,3 +14,7 @@ wheels/
 *.txt
 spotify_cache.db
 .cache
+
+# Spotify MCP server
+spotify-mcp-server/node_modules/
+spotify-mcp-server/spotify-config.json

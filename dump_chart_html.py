@@ -7,7 +7,7 @@ from nodriver import start, Browser, Tab
 async def dump_chart(url):
     for attempt in range(3):
         try:
-            browser: Browser = await start(no_sandbox=True)
+            browser: Browser = await start(sandbox=False, user_data_dir="/tmp/mcp-chrome-profile")
             break
         except Exception:
             if attempt == 2:

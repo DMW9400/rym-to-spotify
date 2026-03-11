@@ -4,6 +4,7 @@ import sys
 import re
 import json
 import time
+import random
 import asyncio
 
 from html import unescape
@@ -229,10 +230,13 @@ def find_next_page(soup, is_chart):
     return None
 
 
-async def scrape_rym(url):
+async def scrape_rym(url, max_pages=None):
     if not url.startswith('https://rateyourmusic.com/'):
         print("Error: Please provide a valid RateYourMusic URL")
         sys.exit(1)
+
+    if max_pages:
+        print(f"Limiting scrape to {max_pages} page(s)")
 
     is_chart = is_chart_url(url)
     base_url = url
@@ -242,7 +246,7 @@ async def scrape_rym(url):
 
     for attempt in range(3):
         try:
-            browser: Browser = await start(no_sandbox=True)
+            browser: Browser = await start(sandbox=False, user_data_dir="/tmp/mcp-chrome-profile")
             break
         except Exception as e:
             if attempt == 2:
@@ -303,11 +307,16 @@ async def scrape_rym(url):
             print(f"Page {page_num}: found {len(items)} items")
 
         next_href = find_next_page(soup, is_chart)
+        if max_pages and page_num >= max_pages:
+            print(f"Reached page limit ({max_pages}). Stopping.")
+            break
         if next_href:
             current_url = urljoin(base_url, next_href)
             print(f"Moving to next page: {current_url}")
+            delay = random.uniform(8, 15)
+            print(f"Waiting {delay:.1f}s before next page...")
+            await asyncio.sleep(delay)
             await tab.get(current_url)
-            await asyncio.sleep(1)
             page_num += 1
         else:
             print("No next page found. Scraping complete.")
@@ -324,10 +333,16 @@ async def scrape_rym(url):
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python rym-to-txt.py <RYM_URL>")
+        print("Usage: python rym-to-txt.py <RYM_URL> [--pages N]")
         print("Example: python rym-to-txt.py https://rateyourmusic.com/list/M4rcus/dream-folk/")
         print("         python rym-to-txt.py https://rateyourmusic.com/charts/top/album/2010s/")
+        print("         python rym-to-txt.py https://rateyourmusic.com/charts/top/album/2010s/ --pages 3")
         sys.exit(1)
 
     rym_url = sys.argv[1]
-    asyncio.run(scrape_rym(rym_url))
+    max_pages = None
+    if '--pages' in sys.argv:
+        idx = sys.argv.index('--pages')
+        if idx + 1 < len(sys.argv):
+            max_pages = int(sys.argv[idx + 1])
+    asyncio.run(scrape_rym(rym_url, max_pages=max_pages))
